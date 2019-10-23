@@ -2,6 +2,7 @@ import UrlShorten from "../models/UrlShorten";
 import nanoid from "nanoid";
 import { DOMAIN_NAME } from "../config/constants";
 import { respondWithWarning } from '../helpers/responseHandler';
+import { getMetric } from '../middlewares/getMetrics';
 
 /**
  * This function trims a new url that hasn't been trimmed before
@@ -11,33 +12,43 @@ import { respondWithWarning } from '../helpers/responseHandler';
  */
 export const trimUrl = async (req, res) => {
 	try {
-      // Generate short code
-      let newUrlCode = nanoid(5);
+		let {expiry_date, custom_url} = req.body;
 
-      const newTrim = new UrlShorten({
-        long_url: req.url,
-        clipped_url: `${DOMAIN_NAME}/${newUrlCode}`,
-        urlCode: newUrlCode,
-        created_by: req.cookies.userID,
-        click_count: 0
-      });
+    let newUrlCode;
 
-      newTrim.save((err, newTrim) => {
-        if (err) {
-          const result = respondWithWarning(res, 500, "Server error");
-          return result;
-        }
-        
-        res.status(201).json({
-          success: true,
-          payload: newTrim
-        });
-      });
+    // this line is there because production server fails to detect our
+    // DOMAIN_NAME config variable
+    const domain_name = DOMAIN_NAME ? DOMAIN_NAME : 'trimly.tk'
+
+		//If the user submitted a custom url, use it. This has been validated by an earlier middleware.
+		if (custom_url) newUrlCode = encodeURIComponent(custom_url); //Sanitize the string as a valid uri comp. first.
+		else newUrlCode = nanoid(5); //If no custom url is provided, generate a random one.
+    
+		const newTrim = new UrlShorten({
+			long_url: req.url,
+      clipped_url: `${domain_name}/${newUrlCode}`,
+			urlCode: newUrlCode,
+			created_by: req.cookies.userID
+		});
+		
+		// Date validation has been done already
+    newTrim.expiry_date = expiry_date ? new Date(expiry_date) : null;
+
+		const trimmed = await newTrim.save()
+		
+    if (!trimmed) {
+      console.log("Failed to save new trim");
+			return respondWithWarning(res, 500, "Server error");
+		}
+		
+		res.status(201).json({
+			success: true,
+			payload: trimmed
+		});
   } 
   catch (err) {
-    console.log(err)
-    const result = respondWithWarning(res, 500, "Server error");
-    return result;
+		console.log(err);
+    return respondWithWarning(res, 500, "Server error");
   }
 };
 
@@ -54,6 +65,15 @@ export const getUrlAndUpdateCount = async (req, res, next) => {
     const url = await UrlShorten.findOne({
       urlCode: id
     });
+    getMetric(url._id, req);
+
+    if(url.expiry_date){
+      const currentDate = new Date()
+      if(currentDate > url.expiry_date){
+        await UrlShorten.findByIdAndDelete(url._id)
+        return res.status(404).render('error');
+      }
+    }
 
     if (!url) {
       return res.status(404).render('error');
